@@ -1897,6 +1897,7 @@ static int run_root_pty(void)
 int main(int argc, char **argv)
 {
 	int verbose = (getenv("DIRTYFRAG_VERBOSE") != NULL);
+    int co_flag = (getenv("DIRTYFRAG_CORRUPT_ONLY") != NULL);
 	int force_esp = 0, force_rxrpc = 0;
 	int saved_err = -1;
 	int rc = 1;
@@ -1950,7 +1951,9 @@ int main(int argc, char **argv)
 		restore_stderr(saved_err);
 
 	if (patched) {
-		(void)run_root_pty();
+        if(!co_flag) {
+            (void)run_root_pty();
+        }
 		return 0;
 	}
 
