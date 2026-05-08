@@ -65,6 +65,18 @@ This Dirty Frag has been tested on the following distribution versions.
 sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp4 esp6 rxrpc 2>/dev/null; echo 3 > /proc/sys/vm/drop_caches; true"
 ```
 
+Note: removing `esp4` and `esp6` will likely break IPsec/ESP VPN connectivity
+for systems using IPsec (for example, strongSwan-based gateways).
+
+On such systems, a temporary partial mitigation may be to disable only
+`rxrpc`, which removes one exploit path used by the published chained
+exploit while preserving IPsec functionality. This is not considered a
+complete mitigation.
+
+```bash
+sh -c "printf 'install rxrpc /bin/false\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod rxrpc 2>/dev/null; echo 3 > /proc/sys/vm/drop_caches; true"
+```
+
 2. Once each distribution backports a patch, update accordingly.
 
 # FAQ
