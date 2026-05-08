@@ -1,0 +1,300 @@
+# Dirty Frag Kubernetes mitigation
+#
+# Disclosure: https://github.com/V4bel/dirtyfrag
+#
+# This manifest applies the Dirty Frag mitigation recommended in the disclosure
+# README to every Linux node in a Kubernetes cluster:
+#
+#     printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' \
+#       > /etc/modprobe.d/dirtyfrag.conf
+#     rmmod esp4 esp6 rxrpc 2>/dev/null
+#     echo 3 > /proc/sys/vm/drop_caches
+#
+# It runs as a DaemonSet so that:
+#   - The mitigation is applied on every existing node, and
+#   - It is automatically re-applied to any new node that joins the cluster
+#     (autoscaling, node-image upgrade, scale-set rolling update, etc.) before
+#     workloads schedule onto it.
+#
+# How it works:
+#   - An init container enters the host's PID, mount, network, IPC and UTS
+#     namespaces with `nsenter -t 1 -m -u -i -n -p` and:
+#       1. Writes /etc/modprobe.d/disable-dirtyfrag.conf so esp4, esp6 and
+#          rxrpc cannot be loaded on demand.
+#       2. For each module currently loaded with refcnt=0, runs `modprobe -r`
+#          to unload it from the live kernel.
+#       3. Runs `sync; echo 3 > /proc/sys/vm/drop_caches` to clear any
+#          contaminated cached pages (gated on DROP_CACHES, default true).
+#       4. If any module remains loaded with refcnt > 0, emits a single
+#          aggregated Warning Kubernetes Event (reason=DirtyFragModulesInUse)
+#          on the Node listing the in-use modules so operators can drain and
+#          reboot/replace the node. This DaemonSet does NOT auto-cordon.
+#   - A long-running `pause` container keeps the pod in Running state so the
+#     init container is only re-executed on pod recreation (i.e. on each new
+#     node).
+#
+# Compatibility note:
+#   esp4 and esp6 provide IPsec ESP transforms; rxrpc provides the RxRPC
+#   socket family used by AFS. If any of your workloads (or the host network)
+#   require these modules, do NOT apply this manifest as-is — either remove
+#   the affected module(s) from the MODULES env var below, or label-exclude
+#   the affected node pool. On a typical workload-only Kubernetes cluster
+#   none of these modules are in use.
+#
+# Reverting once upstream kernel patches roll out:
+#   1. Run a cleanup pass first to remove the modprobe drop-in from live
+#      nodes (the init container's CLEANUP_MODE branch removes the file
+#      and reloads modprobe state):
+#
+#         kubectl -n kube-system set env ds/dirtyfrag-mitigation CLEANUP_MODE=true
+#         kubectl -n kube-system rollout restart ds/dirtyfrag-mitigation
+#         kubectl -n kube-system rollout status  ds/dirtyfrag-mitigation
+#
+#   2. Then delete the resources:
+#
+#         kubectl delete -f dirtyfrag-mitigation.yaml
+#
+# If you skip step 1, the modprobe drop-in remains on existing nodes until
+# each is recycled (node-image upgrade, scale-down, or manual drain+delete).
+#
+# Tested with Kubernetes 1.27+ on AKS, EKS, and GKE (Linux nodes only).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dirtyfrag-mitigation
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: dirtyfrag-mitigation
+    app.kubernetes.io/component: cve-mitigation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dirtyfrag-mitigation
+  labels:
+    app.kubernetes.io/name: dirtyfrag-mitigation
+    app.kubernetes.io/component: cve-mitigation
+rules:
+  # Read node metadata so we can address Events to the running node.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  # Emit Warning Events when any module is in use (refcount > 0).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dirtyfrag-mitigation
+  labels:
+    app.kubernetes.io/name: dirtyfrag-mitigation
+    app.kubernetes.io/component: cve-mitigation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dirtyfrag-mitigation
+subjects:
+  - kind: ServiceAccount
+    name: dirtyfrag-mitigation
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dirtyfrag-mitigation
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: dirtyfrag-mitigation
+    app.kubernetes.io/component: cve-mitigation
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dirtyfrag-mitigation
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%   # init container is fast; roll the whole fleet at once
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dirtyfrag-mitigation
+        app.kubernetes.io/component: cve-mitigation
+    spec:
+      hostPID: true
+      priorityClassName: system-node-critical
+      serviceAccountName: dirtyfrag-mitigation
+      automountServiceAccountToken: true
+      # Run on every Linux node, including system/critical pools.
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      terminationGracePeriodSeconds: 5
+      initContainers:
+        - name: apply-mitigation
+          image: busybox:1.36.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # Node Events follow the kubelet convention of being created in
+            # the `default` namespace; cluster-scoped objects like Nodes
+            # cannot have a namespaced involvedObject reference.
+            - name: EVENT_NAMESPACE
+              value: "default"
+            # Set CLEANUP_MODE=true (e.g. via `kubectl set env`) to flip the
+            # init container into removing the modprobe drop-in instead of
+            # writing it. Use this for a full rollout pass before deleting
+            # the DaemonSet, to clean up live nodes.
+            - name: CLEANUP_MODE
+              value: "false"
+            # Set DROP_CACHES=false to skip `echo 3 > /proc/sys/vm/drop_caches`
+            # (the page-cache flush after unloading modules). Default true,
+            # matching the disclosure's recommended mitigation.
+            - name: DROP_CACHES
+              value: "true"
+            # Space-separated list of modules to blacklist + unload. Edit this
+            # if you need to keep one of these modules available (e.g. IPsec
+            # via esp4/esp6, AFS via rxrpc).
+            - name: MODULES
+              value: "esp4 esp6 rxrpc"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              MODPROBE_FILE=/etc/modprobe.d/disable-dirtyfrag.conf
+
+              if [ "${CLEANUP_MODE}" = "true" ]; then
+                echo "[dirtyfrag] CLEANUP mode on node ${NODE_NAME}: removing mitigation"
+                nsenter -t 1 -m -u -i -n -p -- sh -c "rm -f ${MODPROBE_FILE}; depmod -a 2>/dev/null || true; for m in ${MODULES}; do modprobe -r \$m 2>/dev/null || true; done; true"
+                echo "[dirtyfrag] cleanup complete on ${NODE_NAME}"
+                exit 0
+              fi
+
+              echo "[dirtyfrag] applying mitigation on node ${NODE_NAME} for modules: ${MODULES}"
+
+              # 1. Persist modprobe blacklist so the modules cannot be loaded on demand.
+              #    Rewrite the file from scratch (idempotent) to keep ordering stable
+              #    and match the disclosure's recommended single-file form.
+              nsenter -t 1 -m -u -i -n -p -- sh -c "
+                set -eu
+                TMP=\$(mktemp ${MODPROBE_FILE}.XXXXXX)
+                for m in ${MODULES}; do
+                  printf 'install %s /bin/false\n' \"\$m\" >> \"\$TMP\"
+                done
+                if [ -f ${MODPROBE_FILE} ] && cmp -s \"\$TMP\" ${MODPROBE_FILE}; then
+                  rm -f \"\$TMP\"
+                  echo '[dirtyfrag] ${MODPROBE_FILE} already up to date'
+                else
+                  mv \"\$TMP\" ${MODPROBE_FILE}
+                  chmod 0644 ${MODPROBE_FILE}
+                  echo '[dirtyfrag] wrote ${MODPROBE_FILE}'
+                fi
+                depmod -a 2>/dev/null || true
+              "
+
+              # 2. For each module: if currently loaded, try to unload. Track in-use
+              #    modules so we can emit a single aggregated Warning Event.
+              IN_USE=""
+              for m in ${MODULES}; do
+                REFCNT_PATH=/sys/module/${m}/refcnt
+                if nsenter -t 1 -m -u -i -n -p -- test -f "${REFCNT_PATH}"; then
+                  REFCNT=$(nsenter -t 1 -m -u -i -n -p -- cat "${REFCNT_PATH}")
+                  echo "[dirtyfrag] ${m} is loaded with refcnt=${REFCNT}"
+
+                  if [ "${REFCNT}" = "0" ]; then
+                    if nsenter -t 1 -m -u -i -n -p -- modprobe -r ${m} 2>&1; then
+                      echo "[dirtyfrag] successfully unloaded ${m}"
+                    else
+                      echo "[dirtyfrag] WARNING: rmmod ${m} failed despite refcnt=0"
+                      IN_USE="${IN_USE}${IN_USE:+,}${m}(rmmod-failed)"
+                    fi
+                  else
+                    echo "[dirtyfrag] WARNING: ${m} in use (refcnt=${REFCNT}); node ${NODE_NAME} requires drain+reboot for full mitigation"
+                    IN_USE="${IN_USE}${IN_USE:+,}${m}(refcnt=${REFCNT})"
+                  fi
+                else
+                  echo "[dirtyfrag] ${m} is not loaded; modprobe blacklist will prevent future loads"
+                fi
+              done
+
+              # 3. Drop page caches to clear any contaminated cached pages, per the
+              #    disclosure's mitigation guidance. Best-effort.
+              if [ "${DROP_CACHES}" = "true" ]; then
+                if nsenter -t 1 -m -u -i -n -p -- sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null; then
+                  echo "[dirtyfrag] dropped page caches"
+                else
+                  echo "[dirtyfrag] WARNING: failed to drop page caches"
+                fi
+              fi
+
+              # 4. If any module was in-use, emit a single aggregated Warning Event
+              #    on the Node so operators get an actionable signal.
+              #    Best-effort: do not fail the init container if the API call fails.
+              #    BusyBox `wget --no-check-certificate` is used because BusyBox wget
+              #    does not support `--ca-certificate`; the bearer token still
+              #    authenticates us to the API server, and the endpoint is the
+              #    in-cluster `kubernetes.default.svc` ClusterIP, so skipping TLS
+              #    chain validation is an accepted trade-off for a best-effort emitter.
+              if [ -n "${IN_USE}" ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                APISERVER=https://kubernetes.default.svc
+                NODE_UID=$(wget -qO- --no-check-certificate \
+                  --header="Authorization: Bearer ${TOKEN}" \
+                  "${APISERVER}/api/v1/nodes/${NODE_NAME}" 2>/dev/null | \
+                  sed -n 's/.*"uid":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)
+                TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                EVENT_NAME="dirtyfrag-mitigation.${NODE_NAME}.$(date +%s)"
+                EVENT_BODY=$(cat <<EOF
+              {"apiVersion":"v1","kind":"Event","metadata":{"name":"${EVENT_NAME}","namespace":"${EVENT_NAMESPACE}"},"involvedObject":{"apiVersion":"v1","kind":"Node","name":"${NODE_NAME}","uid":"${NODE_UID}"},"reason":"DirtyFragModulesInUse","message":"Dirty Frag: the following kernel modules are in use and could not be unloaded: ${IN_USE}. Drain and reboot/replace this node to fully mitigate.","type":"Warning","firstTimestamp":"${TS}","lastTimestamp":"${TS}","count":1,"source":{"component":"dirtyfrag-mitigation"}}
+              EOF
+              )
+                if wget -qO- --no-check-certificate \
+                     --header="Authorization: Bearer ${TOKEN}" \
+                     --header="Content-Type: application/json" \
+                     --post-data="${EVENT_BODY}" \
+                     "${APISERVER}/api/v1/namespaces/${EVENT_NAMESPACE}/events" >/dev/null 2>&1; then
+                  echo "[dirtyfrag] emitted Warning Event ${EVENT_NAME} (in-use: ${IN_USE})"
+                else
+                  echo "[dirtyfrag] WARNING: failed to emit Kubernetes Event"
+                fi
+              fi
+
+              echo "[dirtyfrag] mitigation complete on ${NODE_NAME}"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        # Long-running placeholder so the pod stays Running and the init
+        # container is re-executed only on pod recreate (i.e. on each new node).
+        - name: pause
+          image: registry.k8s.io/pause:3.10.1
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
