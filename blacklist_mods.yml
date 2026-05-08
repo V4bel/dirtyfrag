@@ -35,3 +35,11 @@
         state: present
       loop: "{{ modules_to_blacklist }}"
 
+    - name: Force /bin/false return on attempts to load kernel modules
+      lineinfile:
+        path: /etc/modprobe.d/blacklist.conf
+        line: "install {{ item }} /bin/false"
+        create: yes
+        mode: '0644'
+        state: present
+      loop: "{{ modules_to_blacklist }}"
