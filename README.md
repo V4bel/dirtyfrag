@@ -66,6 +66,14 @@ sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /
 
 2. Once each distribution backports a patch, update accordingly.
 
+## Kubernetes
+
+For Kubernetes clusters, [`k8s/dirtyfrag-mitigation.yaml`](k8s/dirtyfrag-mitigation.yaml) deploys a DaemonSet that applies the same mitigation on every Linux node and re-applies it automatically on any new node that joins the cluster. See [`k8s/README.md`](k8s/README.md) for details, compatibility notes, and the revert procedure.
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/V4bel/dirtyfrag/master/k8s/dirtyfrag-mitigation.yaml
+```
+
 # FAQ
 
 ## Why did you chain two vulnerabilities?
