@@ -1,0 +1,45 @@
+- name: Blacklist kernel modules
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    modules_to_blacklist:
+      # DirtyFrag
+      - esp4
+      - esp6
+      - rxrpc
+
+  tasks:
+    - name: Ensure blacklist directory exists
+      file:
+        path: /etc/modprobe.d
+        state: directory
+        mode: '0755'
+
+    - name: Check if module is currently loaded
+      shell: "lsmod | grep -qw '{{ item }}'"
+      loop: "{{ modules_to_blacklist }}"
+      register: lsmod_check
+      changed_when: false
+      # If rc is 0, the module is loaded -> Fail the task
+      failed_when: lsmod_check.rc == 0
+
+    - name: Blacklist kernel modules
+      # Only executes if the previous task succeeded (meaning module was NOT loaded)
+      lineinfile:
+        path: /etc/modprobe.d/blacklist.conf
+        line: "blacklist {{ item }}"
+        create: yes
+        mode: '0644'
+        state: present
+      loop: "{{ modules_to_blacklist }}"
+
+    - name: Force /bin/false return on attempts to load kernel modules
+      lineinfile:
+        path: /etc/modprobe.d/blacklist.conf
+        line: "install {{ item }} /bin/false"
+        create: yes
+        mode: '0644'
+        state: present
+      loop: "{{ modules_to_blacklist }}"
