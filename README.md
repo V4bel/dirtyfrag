@@ -55,7 +55,10 @@ This Dirty Frag has been tested on the following distribution versions.
 - CentOS Stream 10: 6.12.0-224.el10.x86_64
 - AlmaLinux 10: 6.12.0-124.52.3.el10_1.x86_64
 - Fedora 44: 6.19.14-300.fc44.x86_64
+- Pop!_OS 24.04 LTS: 6.18.7-76061807-generic
 - ...
+
+> **Pop!_OS note:** System76 applied mitigation via kernel update on 2026-05-08. Modules `esp4`, `esp6`, and `rxrpc` blacklisted via `/etc/modprobe.d/pop-default-settings-dirty-frag.conf`. `rxrpc` patch still pending upstream; `esp4`/`esp6` patched but kept disabled. See: https://system76.com/blog/post/linux-zero-day-dirty-frag-and-copy-fail-vulnerability-fixes-released
 
 # Mitigation
 
