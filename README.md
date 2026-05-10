@@ -55,7 +55,8 @@ This Dirty Frag has been tested on the following distribution versions.
 - CentOS Stream 10: 6.12.0-224.el10.x86_64
 - AlmaLinux 10: 6.12.0-124.52.3.el10_1.x86_64
 - Fedora 44: 6.19.14-300.fc44.x86_64
-- ...
+- Ubuntu 26.04 kernel 7.0.0.15 generic
+- Mint 22.3
 
 # Mitigation
 
@@ -65,6 +66,7 @@ sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /
 ```
 
 2. Once each distribution backports a patch, update accordingly.
+3. Kernel 7.0.5 patched the flaw: [Linux kernel 7.0.5 ChangeLog](https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.0.5)
 
 # FAQ
 
