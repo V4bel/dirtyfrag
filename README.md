@@ -66,6 +66,7 @@ sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /
 ```
 
 2. Once each distribution backports a patch, update accordingly.
+3. Kernel 7.0.5 patched the flaw: [Linux kernel 7.0.5 ChangeLog](https://cdn.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.0.5)
 
 # FAQ
 
