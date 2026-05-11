@@ -90,6 +90,8 @@ extern int g_su_verbose;
 int g_su_verbose = 0;
 #define SLOG(fmt, ...) do { if (g_su_verbose) fprintf(stderr, "[su] " fmt "\n", ##__VA_ARGS__); } while (0)
 
+int g_esp4_available = 1;
+
 static int write_proc(const char *path, const char *buf)
 {
 	int fd = open(path, O_WRONLY);
@@ -219,33 +221,79 @@ static int add_xfrm_sa(uint32_t spi, uint32_t patch_seqhi)
 	struct nlmsghdr *rh = (struct nlmsghdr *)rbuf;
 	if (rh->nlmsg_type == NLMSG_ERROR) {
 		struct nlmsgerr *e = NLMSG_DATA(rh);
-		if (e->error) { close(sk); return -1; }
+		if (!e->error)
+			goto out;
+
+		if (e->error != -EPROTONOSUPPORT) { close(sk); return -1; }
+
+		xs->family      = AF_INET6;
+		inet_pton(AF_INET6, "::1", &xs->id.daddr.a6);
+		inet_pton(AF_INET6, "::1", &xs->saddr.a6);
+		inet_pton(AF_INET6, "::1", &xs->sel.daddr.a6);
+		inet_pton(AF_INET6, "::1", &xs->sel.saddr.a6);
+		xs->sel.family  = AF_INET6;
+		xs->sel.prefixlen_d = 128;
+		xs->sel.prefixlen_s = 128;
+
+		if (send(sk, nlh, nlh->nlmsg_len, 0) < 0) { close(sk); return -1; }
+		n = recv(sk, rbuf, sizeof(rbuf), 0);
+		if (n < 0) { close(sk); return -1; }
+
+		if (rh->nlmsg_type == NLMSG_ERROR) {
+			struct nlmsgerr *e = NLMSG_DATA(rh);
+			if (e->error) { close(sk); return -1; }
+		}
+
+		if (g_esp4_available)
+			SLOG("ESP4 protocol isn't available, but ESP6 is");
+
+		g_esp4_available = 0;
 	}
+
+out:
 	close(sk);
 	return 0;
 }
 
 static int do_one_write(const char *path, off_t offset, uint32_t spi)
 {
-	int sk_recv = socket(AF_INET, SOCK_DGRAM, 0);
+	int sk_recv = socket(g_esp4_available ? AF_INET : AF_INET6, SOCK_DGRAM, 0);
 	if (sk_recv < 0) return -1;
 	int one = 1;
 	setsockopt(sk_recv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-	struct sockaddr_in sa_d = {
-		.sin_family = AF_INET,
-		.sin_port   = htons(ENC_PORT),
-		.sin_addr   = { inet_addr("127.0.0.1") },
-	};
-	if (bind(sk_recv, (struct sockaddr*)&sa_d, sizeof(sa_d)) < 0) {
+	union {
+		struct sockaddr_in sa_d;
+		struct sockaddr_in6 sa6_d;
+	} sa;
+	size_t sa_l;
+
+	if (g_esp4_available) {
+		sa.sa_d = (struct sockaddr_in) {
+			.sin_family = AF_INET,
+			.sin_port   = htons(ENC_PORT),
+			.sin_addr   = { inet_addr("127.0.0.1") },
+		};
+		sa_l = sizeof(sa.sa_d);
+	} else {
+		sa.sa6_d = (struct sockaddr_in6) {
+			.sin6_family = AF_INET6,
+			.sin6_port   = htons(ENC_PORT),
+		};
+		inet_pton(AF_INET6, "::1", &sa.sa6_d.sin6_addr);
+		sa_l = sizeof(sa.sa6_d);
+	}
+
+	if (bind(sk_recv, (struct sockaddr*)&sa, sa_l) < 0) {
 		close(sk_recv); return -1;
 	}
+
 	int encap = UDP_ENCAP_ESPINUDP;
 	if (setsockopt(sk_recv, IPPROTO_UDP, UDP_ENCAP, &encap, sizeof(encap)) < 0) {
 		close(sk_recv); return -1;
 	}
-	int sk_send = socket(AF_INET, SOCK_DGRAM, 0);
+	int sk_send = socket(g_esp4_available ? AF_INET : AF_INET6, SOCK_DGRAM, 0);
 	if (sk_send < 0) { close(sk_recv); return -1; }
-	if (connect(sk_send, (struct sockaddr*)&sa_d, sizeof(sa_d)) < 0) {
+	if (connect(sk_send, (struct sockaddr*)&sa, sa_l) < 0) {
 		close(sk_send); close(sk_recv); return -1;
 	}
 	int file_fd = open(path, O_RDONLY);

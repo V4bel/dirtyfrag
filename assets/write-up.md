@@ -451,7 +451,7 @@ The chain exploit proceeds as follows.
 2. Check whether the first byte of the shellcode has been planted at the entry offset of /usr/bin/su.
    On modification success → parent process performs forkpty + execve("/usr/bin/su") → root shell.
 
-3. On modification failure (e.g. unshare(USER) returns -EPERM, or esp4.ko is not loaded, or SA registration fails):
+3. On modification failure (e.g. unshare(USER) returns -EPERM, or neither esp4.ko nor esp6.ko is loaded, or SA registration fails):
      Fall back to the RxRPC variant:
      /etc/passwd line 1 K search → three splice triggers → passwd field empty
      forkpty + execve("/usr/bin/su") → PAM nullok → root shell.
