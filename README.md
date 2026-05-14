@@ -55,6 +55,7 @@ This Dirty Frag has been tested on the following distribution versions.
 - CentOS Stream 10: 6.12.0-224.el10.x86_64
 - AlmaLinux 10: 6.12.0-124.52.3.el10_1.x86_64
 - Fedora 44: 6.19.14-300.fc44.x86_64
+- Arch Linux: 7.0.3-arch1-2
 - ...
 
 # Mitigation
