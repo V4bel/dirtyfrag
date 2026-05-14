@@ -38,7 +38,7 @@ This PoC is provided as accurate information following consultation with linux-d
 echo 3 > /proc/sys/vm/drop_caches
 ```
 
-or reboot the system.
+or exit root & reboot the system.
 
 # Affected Versions
 
