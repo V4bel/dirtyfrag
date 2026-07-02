@@ -30,7 +30,7 @@ Dirty Frag is a vulnerability where the same pattern is reproduced on top of the
 
 Note that Dirty Frag can be triggered regardless of whether the `algif_aead` module is available. In other words, even on systems where the publicly known Copy Fail mitigation (algif_aead blacklist) is applied, your Linux is still vulnerable to Dirty Frag.
 
-# xfrm-ESP Page-Cache Write
+# CVE-2026-43284: xfrm-ESP Page-Cache Write
 
 ## Root Cause
 
@@ -178,7 +178,7 @@ By cycling i over 0..47, the 192-byte ELF is fully assembled on top of the page 
 
 ## Patch
 
-The [patch](https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net.git/commit/?id=f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4) sets the `SKBFL_SHARED_FRAG` flag on page frags that came in via `splice` in the IPv4/IPv6 datagram append paths, and in the skip_cow branch of ESP input (`esp_input` / `esp6_input`) it checks this flag so that an skb with externally pinned pages is always routed to the `skb_cow_data` path. As a result, attacker-pinned page cache pages can no longer enter the dst SGL of the in-place AEAD, and page cache modification is blocked.
+The [patch](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4) sets the `SKBFL_SHARED_FRAG` flag on page frags that came in via `splice` in the IPv4/IPv6 datagram append paths, and in the skip_cow branch of ESP input (`esp_input` / `esp6_input`) it checks this flag so that an skb with externally pinned pages is always routed to the `skb_cow_data` path. As a result, attacker-pinned page cache pages can no longer enter the dst SGL of the in-place AEAD, and page cache modification is blocked.
 
 ```diff
 diff --git a/net/ipv4/esp4.c b/net/ipv4/esp4.c
@@ -252,7 +252,7 @@ My v1 patch took the approach of calling `skb_cow_data()` directly in the input 
 - 2026-05-08: The [f4c50a4034e6](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f4c50a4034e62ab75f1d5cdd191dd5f9c77fdff4) patch was merged into mainline.
 - 2026-05-08: This vulnerability was assigned CVE-2026-43284.
 
-# RxRPC Page-Cache Write
+# CVE-2026-43500: RxRPC Page-Cache Write
 
 ## Root Cause
 
@@ -390,34 +390,35 @@ For each of the three positions (off = 4, 6, 8), the exploit runs the following 
 
 ## Patch
 
-A patch for this vulnerability does not exist upstream. The [patch](https://lore.kernel.org/all/afKV2zGR6rrelPC7@v4bel/) that I submitted is as follows:
-
-The existing code only checked `skb_cloned(skb)` right before the in-place decrypt, so a non-linear skb pinned into the frag via splice reached the decrypt sink as is. This patch adds `|| skb->data_len` to the gate so that non-linear skbs are also isolated via `skb_copy()`.
+The [patch](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=aa54b1d27fe0c2b78e664a34fd0fdf7cd1960d71) extends the gate before in-place decryption from a single `skb_cloned(skb)` check to also catch `skb_has_frag_list(skb) || skb_has_shared_frag(skb)`, so that skbs carrying a chained frag list or externally-shared paged frags are isolated via `skb_copy()` instead of reaching the decrypt sink directly.
 
 ```diff
 diff --git a/net/rxrpc/call_event.c b/net/rxrpc/call_event.c
-index fdd683261226..6c924ef55208 100644
+index fdd683261226..2b19b252225e 100644
 --- a/net/rxrpc/call_event.c
 +++ b/net/rxrpc/call_event.c
-@@ -334,7 +334,7 @@ bool rxrpc_input_call_event(struct rxrpc_call *call)
- 
+@@ -334,7 +334,9 @@ bool rxrpc_input_call_event(struct rxrpc_call *call)
+
  			if (sp->hdr.type == RXRPC_PACKET_TYPE_DATA &&
  			    sp->hdr.securityIndex != 0 &&
 -			    skb_cloned(skb)) {
-+			    (skb_cloned(skb) || skb->data_len)) {
++			    (skb_cloned(skb) ||
++			     skb_has_frag_list(skb) ||
++			     skb_has_shared_frag(skb))) {
  				/* Unshare the packet so that it can be
  				 * modified by in-place decryption.
  				 */
 diff --git a/net/rxrpc/conn_event.c b/net/rxrpc/conn_event.c
-index a2130d25aaa9..eab7c5f2517a 100644
+index a2130d25aaa9..442414d90ba1 100644
 --- a/net/rxrpc/conn_event.c
 +++ b/net/rxrpc/conn_event.c
-@@ -245,7 +245,7 @@ static int rxrpc_verify_response(struct rxrpc_connection *conn,
+@@ -245,7 +245,8 @@ static int rxrpc_verify_response(struct rxrpc_connection *conn,
  {
  	int ret;
- 
+
 -	if (skb_cloned(skb)) {
-+	if (skb_cloned(skb) || skb->data_len) {
++	if (skb_cloned(skb) || skb_has_frag_list(skb) ||
++	    skb_has_shared_frag(skb)) {
  		/* Copy the packet if shared so that we can do in-place
  		 * decryption.
  		 */
@@ -431,6 +432,7 @@ index a2130d25aaa9..eab7c5f2517a 100644
 - 2026-05-07: Detailed information and the exploit for the esp vulnerability were published publicly by an unrelated third party, breaking the embargo.
 - 2026-05-07: After obtaining agreement from distribution maintainers to fully disclose Dirty Frag, the entire Dirty Frag document was published.
 - 2026-05-08: CVE-2026-43500 was reserved for tracking this vulnerability.
+- 2026-05-10: The [aa54b1d27fe0](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=aa54b1d27fe0c2b78e664a34fd0fdf7cd1960d71) patch was merged into mainline.
 
 # Chaining
 
