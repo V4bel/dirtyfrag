@@ -38,7 +38,15 @@ This PoC is provided as accurate information following consultation with linux-d
 echo 3 > /proc/sys/vm/drop_caches
 ```
 
-or reboot the system.
+If you are not in a root shell, use:
+
+```bash
+echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+```
+
+Using sudo only with echo does not elevate the shell redirection.
+
+Alternatively, reboot the system.
 
 # Affected Versions
 
